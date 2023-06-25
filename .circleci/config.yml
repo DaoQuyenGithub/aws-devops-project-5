@@ -1,0 +1,178 @@
+version: 2.1
+
+jobs:
+  init:
+    docker:
+      - image: python:3.7.3-stretch
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "requirements.txt" }}
+      - run:
+          name: Install dependencies
+          command: |
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make install
+      - save_cache:
+          paths:
+            - ./.devops-capstone/bin
+          key: v1-dependencies-{{ checksum "requirements.txt" }}
+      - run:
+          name: Run lint
+          command: |
+            source .devops-capstone/bin/activate
+            make lint
+  deploy-docker:
+    docker:
+      - image: cimg/python:3.10.4
+    steps:
+      - checkout
+      - setup_remote_docker
+      - restore_cache:
+          keys:
+            - v1-dependencies
+      - run:
+          name: Deploy by makefile
+          command: |
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make build-docker-v1
+            make upload-docker
+  create-resource:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies
+      - run:
+          name: install dependency
+          command: |
+            yum update -y
+            yum groupinstall -y 'Development Tools'
+            yum install -y python3
+            yum upgrade
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make install
+      - run:
+          name: create eks
+          command: |
+            source .devops-capstone/bin/activate
+            make eks-create-cluster
+  deploy-eks:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies
+      - run:
+          name: install dependency
+          command: |
+            yum update -y
+            yum groupinstall -y 'Development Tools'
+            yum install -y python3
+            yum upgrade
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make install
+      - run:
+          name: deploy eks
+          command: |
+            make cluster-deployment
+  deploy-docker-rolling-update:
+    docker:
+      - image: cimg/python:3.10.4
+    steps:
+      - checkout
+      - setup_remote_docker
+      - restore_cache:
+          keys:
+            - v1-dependencies
+      - run:
+          name: Deploy by makefile
+          command: |
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make build-docker-v2
+            make upload-docker
+  rolling-update:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - v1-dependencies
+      - run:
+          name: Install dependency
+          command: |
+            yum install -y tar gzip
+            yum update -y
+            yum groupinstall -y 'Development Tools'
+            yum install -y python3
+            yum upgrade
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make install
+
+      - run:
+          name: update
+          no_output_timeout: 30m
+          command: |
+            aws configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
+            aws configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
+            aws configure set region ${AWS_DEFAULT_REGION}
+            aws sts get-caller-identity
+            make rollout-status
+
+  clean-up:
+    docker:
+      - image: amazon/aws-cli
+    steps:
+      - checkout
+      - run:
+          name: Install dependency
+          command: |
+            yum install -y tar gzip
+            yum update -y
+            yum groupinstall -y 'Development Tools'
+            yum install -y python3
+            yum upgrade
+            python3 -m venv .devops-capstone
+            source .devops-capstone/bin/activate
+            make install
+      - run:
+          name: Delete resource
+          command: |
+            aws configure set aws_access_key_id ${AWS_ACCESS_KEY_ID}
+            aws configure set aws_secret_access_key ${AWS_SECRET_ACCESS_KEY}
+            aws configure set region ${AWS_DEFAULT_REGION}
+            aws sts get-caller-identity
+            make cluster-cleanup
+            make eks-delete-cluster
+
+workflows:
+  default:
+    jobs:
+      - init
+      - deploy-docker:
+          requires: [init]
+      - create-resource:
+          requires: [deploy-docker]
+      - deploy-eks:
+          requires: [create-resource]
+      - deploy-docker-rolling-update:
+          requires: [deploy-eks]
+      - continue-rolling:
+          type: approval
+          requires: [deploy-docker-rolling-update]
+      - rolling-update:
+          requires: [continue-rolling]
+      # - clean-up:
+      #     requires: [rolling-update]
